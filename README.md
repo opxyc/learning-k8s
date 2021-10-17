@@ -987,3 +987,51 @@ nodes. In this case we have the web application on PODs on separate nodes in the
 When we create a service , without us having to do ANY kind of additional
 configuration, kubernetes creates a service that spans across all the nodes in the cluster and maps the target port to the SAME NodePort on all the nodes in the cluster. This way you can access your application using the IP of any node in the cluster and using the same port number which in this case is 30008. 😃
 
+## ClusterIP
+
+![](./assets/clusterip.png)
+
+A full stack web application typically has different kinds of PODs hosting different parts of an application like a set of pods backend server, a set of PODs running a keyvalue store like Redis, another set of PODs running a persistent database like MySQL etc.  The web front-end servers need to connect to the backend-workers and the backend-workers need to connect to database as well as the redis services. 
+
+#### So what IS the right way to establish connectivity between these PODs?
+The PODs all have an IP address assigned to them. But these Ips as we know are not static, these PODs can go down anytime and new PODs are created all the time – and so **you CANNOT rely on these IP addresses for internal communication within the application**. 
+
+A kubernetes service can help us group these PODs together and provide a single interface to access the PODs in a group. For example a service created for the backend PODs will help group all the backend PODs together and provide a single interface for other PODs to access this service. The requests are forwarded to one of the PODs under the service randomly. Similarly, create additional services for Redis and allow the backend PODs to access the redis system through this service. This enables us to easily and effectively deploy a microservices based application on kubernetes cluster. Each layer can now scale or move as required without impacting communication between the various services. Each service gets an IP and name assigned to it inside the cluster and that is the name that should be used by other PODs to access the service. This type of service is known as **ClusterIP**.
+
+(We will be using the same pod definition is this example also and connect them with a service).
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-clusterip
+spec:
+  type: ClusterIP # it's optional
+                  # if nothing is mentioned, k8s defaults it to ClusterIP
+  selector:
+    app: myapp
+    type: front-end
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
+## LoadBalancer
+![](./assets/loadbalancer.png)
+
+We have a 3 node cluster with Ips 192.168.1.2,3 and 4. Our application is two tier, there is a database service and a front-end web service for users to access the application. The default service type – known as ClusterIP – makes a service, such as a redis or database service available internally within the kubernetes cluster for other applications to consume. The next tier in my application happens to be a python based web front-end. This application connects to the backend using Service created for the redis service. To expose the application to the end users, we create another service of type NodePort. Creating a service of type NodePort exposes the application on a high end port of the Node and the users can access the application at any IP of my nodes with the port 30008. 
+
+Now, what IP do you give your end users to access your application? You cannot give them all three and let them choose one of their own. What end users really want is a single URL to access the application. For this, you will be required to setup a separate Load Balancer VM in your environment. In this case I deploy a new VM for load balancer purposes and configure it to forward requests that come to it to any of the Ips of the Kubernetes nodes. I will then configure my organizations DNS to point to this load balancer when a user hosts http://myapp.com. Now setting up that load balancer by myself is a tedious task, and I might have to do that in my local or onprem environment. However, if I happen to be on a supported CloudPlatform, like Google Cloud Platform, I could leverage the native load balancing functionalities of the cloud platform to set this up. Again you don’t have to set that up manually, Kubernetes sets it up for you. Kubernetes has built-in integration with supported cloud platforms.
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-lb
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30080
+```
