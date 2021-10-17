@@ -1,0 +1,989 @@
+# K8
+## Basic Terms
+- Kubernetes - the hwile orchestration system 
+- Kubectl - CLI to configure kubernetes and manage apps
+- Noe - Single server in Kubernetes cluster
+- Kubelet - Kubernetes agent running on nodes
+- Control Plane - Set of containers that manage the cluster
+
+    Includes API server, scheduler, controller manager, etcd(a disctiructed key value store), CoreDNS and more..
+
+- Pod - one or more containers running together on one Node
+
+    It's the basic unit of deployment. Containers are always in pods.
+
+- Controller - For creating/updating pods and other objects
+
+    Ideally, we can create pods with out controllers. But, it's recommended to have a controller for pods.
+
+    Many types of Controllers inc. Deployment, ReplicaSet, StatefulSet, DarmonSet, Job, CronJob, etc.
+
+- Service - network endpoint to connect to a pod
+- Namespace - filtered group of objects in cluster (it's a filter on our view on the command line) // it's not the same as namespaces in Docker internals.
+- Secrets, ConfigMaps and more..
+
+> play-with-k8s.com or katacoda.com
+
+Install microK8 and set `alias kubectl=microk8.kubectl` in profile.
+
+## Basic Usage
+### run, create, apply
+```
+kubectl run - for pod creation
+kubectl create - create some resources via CLI or YAML
+kubectl apply - create/update anything via YAML
+```
+
+### create pod with kubectl run
+```
+kubectl run my-nginx --image nginx
+kubectl get pods
+```
+```sh
+[be@fedora ~]$ kubectl get pods
+NAME       READY   STATUS    RESTARTS   AGE
+my-nginx   1/1     Running   0          2m54s
+[be@fedora ~]$ kubectl get all
+NAME           READY   STATUS    RESTARTS   AGE
+pod/my-nginx   1/1     Running   0          3m11s
+
+NAME                 TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/kubernetes   ClusterIP   10.152.183.1   <none>        443/TCP   42m
+```
+
+### clean up
+```
+kubectl delete pod my-nginx
+```
+
+### scaling ReplicaSets
+```
+kubectl run web --image nginx:latest
+kubectl scale deploy/web --replicas 2
+```
+
+### inspecting k8 objects
+```sh
+kubectl get pods
+kubectl get all
+# get container logs
+kubectl logs deployment/<name> [--follow --tail N]
+kubectl logs -l run=web
+# describe pods
+kubectl describe pod/<name>
+# watch (without needing `watch` installed)
+kubectl get pods -w
+```
+
+## Services
+### Exposing Containers
+`kubectl expose` creates a service for existing pods. **Service** is a stable address for pod(s) which can be accessed from outside. If we want to connect to pod(s), we need a service.
+
+CoreDNS allows us to resolve services by name.
+
+Types of services:
+- ClusterIP (default) - only available in the cluster
+
+    - Single and internal virtual IP allocated. 
+    - Only reachable from within cluster - nodes and pods.
+    - Pods can rach service on apps port number.
+- NodePort - for clusters to talk to each other
+
+    - High port allocated on each node
+    - Port is open every node's IP
+    - Anyone can connect
+    - Other pods need to be updated to this port
+- LoadBalancer - for K8 to talk to external LBs
+    - Controls a LB endpoint external to the cluster
+    - Only available when infra provider gives you a LB(AWS ELB etc.)
+    - Creates NodePort and ClusterIP services, and tells LB to send to NodePort.
+    - This is only for traffic coming from external source to K8.
+- ExternalName
+    - Used less often.
+    - For controlling traffic which is outbound from K8.
+    - Adds CNAME DNS record to CoreDNS only.
+    - Not used for Pods, but for giving pods a DNS name to use for something outside K8s.
+
+### Creating a ClusterIP Service
+Create a deployment
+```
+kubectl create deployment httpenv --image=bretfisher/httpenv
+deployment.apps/httpenv created
+kubectl scale deployment/httpenv --replicas 2
+```
+Export the service:
+```
+kubectl expose deployment/httpenv --port 8888
+```
+Get the service IP:
+```
+kubectl get service
+```
+```sh
+[be@fedora ~]$ kubectl get service
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+kubernetes   ClusterIP   10.152.183.1     <none>        443/TCP    96m
+httpenv      ClusterIP   10.152.183.228   <none>        8888/TCP   10m
+```
+But, the IP assigned to that cluster is internal to that cluster. How do we curl it?
+
+- If we are on Docker Desktop(where Host OS is not container OS), we have to create another pod inside the same cluster and we can curl it within that pod. `curl [deployment name]:PORT`
+
+```
+kubectl run tmp-shell --rm -it --image bretfisher/netshoot sh
+If you don't see a command prompt, try pressing enter.
+/ # curl httpenv:8888
+{"HOME":"/root","HOSTNAME":"httpenv-6fdc8554fb-qp52l",
+...
+local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+```
+ - If we'r on Lnux host, we directly curl the service on it's IP. `curl [IP of service]:PORT`
+```
+[be@fedora ~]$ curl 10.152.183.228:8888
+{"HOME":"/root","HOSTNAME":"httpenv-6fdc8554fb-qp52l"
+,...
+local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+```
+
+### Creating a NodePort & LoadBalancer Service
+Let's create a service which is exposed to the host.
+```
+kubectl expose deployment/httpenv --port 8888 --name httpenv-np --type NodePort
+```
+```sh
+[be@fedora ~]$ kubectl get services
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)          AGE
+kubernetes   ClusterIP   10.152.183.1     <none>        443/TCP          23h
+httpenv      ClusterIP   10.152.183.228   <none>        8888/TCP         21h
+httpend-np   NodePort    10.152.183.112   <none>        8888:30373/TCP   94s
+```
+Here `8888:30373/TCP`, port 8888 is internal to the service and 30373 is for the host(representation is opposite to port exposing in Docker). The range 30000-32767 are preset inside the container cluster for mappings like this.
+
+The three types of services are additive - each one creates the one above it:
+ - ClusterIP
+ - NodePort
+ - LoadBalancer
+
+(all of this is ofcourse customizable..)
+
+#### Add a LB
+```
+kubectl expose deployment/httpenv --port 8888 --name httpenv-lb --type LoadBalancer
+```
+If you are on minikube or microk8s, there is no builtin load balancer and hence it will stay at "pending" state (but it's NodePort will work).
+
+## K8s Services DNS
+- Starting with 1.11 Internal DNS is provided by CoreDNS
+- Like Swarm, this is DNS-Based Service Discovery
+- So far we've been using hostnames to access Services - `curl <hostname>`
+- But that only works for Services in the same Namespace - `kubectl get namespaces`
+
+    You can't technically create the same pod, or the same service, or the same Deployment, with the same names, in the same namespace. If you create other namespaces, which you may do as you get more advanced, you can then have the same things named in different namespaces and they won't clash. That includes DNS.
+
+- Services also has a FQDN
+
+    `<hostname>.<namespace>.svc.cluster.local`
+
+## K8s Management
+### Run, Expost and Create Generators
+```
+kubectl create deployment test --image nginx --dry-run -o yaml
+```
+```
+[be@fedora ~]$ kubectl create deployment test --image nginx:alpine --dry-run=client -o yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: test
+  name: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: test
+    spec:
+      containers:
+      - image: nginx:alpine
+        name: nginx
+        resources: {}
+status: {}
+```
+
+```
+[be@fedora ~]$ kubectl create job test --image nginx:alpine --dry-run=client -o yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  creationTimestamp: null
+  name: test
+spec:
+  template:
+    metadata:
+      creationTimestamp: null
+    spec:
+      containers:
+      - image: nginx:alpine
+        name: test
+        resources: {}
+      restartPolicy: Never
+status: {}
+[be@fedora ~]$ 
+```
+
+### Three Management Approaches
+- Imperative Commands
+
+    - `run`, `expose`, `scale`, `edit`, `create deployment` etc.
+    - Best for dev/learning/personal proects
+    - Easy to learn, hardest to manage over time
+- Imperative Obejcts
+
+    - `create -f file.yml`, `replace -f file.yml`, `delete`...
+    - Good for prod of small environments, single file per command
+    - Store your changes in git-based yaml files
+    - Hard to automate
+- Declarative objects
+
+    - `apply -f file.yml`
+    - Best for prod, easier to automate
+
+## Declarative Orchestration - using yml
+- Create/update resources in a file
+```
+kubectl apply -f filename.yml
+```
+- Create/update a whole directory of yaml
+```
+kubectl apply -f myyaml/
+```
+- Create/upate from a URL
+```
+kubectl apply -f http://foo/file.yml
+```
+
+### Configuration YAML
+- Each file contains one or more manifests
+- Each manifest desctibes an API obejct(deployment, job, secret)
+- Each manifest needs four parts (root key:values in the file)
+
+  - apiVersion:
+  - kind:
+  - metadata:
+  - spec:
+
+Example: for a pod
+```yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:alpine
+    ports:
+    - containerPort: 80
+```
+
+Example: for a deployment
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+```
+
+Example: deployment and service together
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-nginx-service
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+  selector:
+    app: app-nginx
+# separator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-nginx-deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: app-nginx
+  template:
+    metadata:
+      labels:
+        app: app-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+```
+
+### Building yml files
+Start from https://kubernetes.io
+
+```kind```
+
+get it from `kubectl api-resources`:
+```
+e@fedora Desktop]$ kubectl api-resources
+NAME                              SHORTNAMES   APIVERSION                             NAMESPACED   KIND
+bindings                                       v1                                     true         Binding
+componentstatuses                 cs           v1                                     false        ComponentStatus
+configmaps                        cm           v1                                     true         ConfigMap
+endpoints                         ep           v1                                     true         Endpoints
+events                            ev           v1                                     true         Event
+```
+
+
+---
+# Architecture and Components
+Kubernetes architecture basically contains:
+- worker nodes and
+- master node for controlling the worker nodes
+
+where a node means any system (physical or virtual) capable of running K8 services.
+
+![](./assets/architecture.png)
+
+What distinguishes master node from workers is the services running on it. Wokers will have:
+- kublet service 
+- container runtime
+
+and master will have:
+- kube-apiserver
+- etcd
+- scheduler
+- controller
+
+Containers are hosten in the worker node. For example Docker containers, and to run docker containers on a system, we need a
+container runtime installed. And that’s were the container runtime falls. 
+
+The master server has the kube-apiserver and that is what makes it a master. Similarly the worker nodes have the kubelet agent that is responsible for interacting with the master to provide health information of the worker node and carry out actions requested by the master on the worker nodes. ETCD is a distributed reliable key-value store used by kubernetes to store all data used to manage the cluster.  The scheduler is responsible for distributing work or containers across multiple nodes. It looks for newly created containers and assigns them to Nodes. The controllers are the brain behind orchestration. They are responsible for noticing and responding when nodes, containers or endpoints goes down. The controllers makes decisions to bring up new containers in such cases.
+
+# PODs
+In K8s, he containers are encapsulated into a Kubernetes object
+known as PODs. A POD is a single instance of an application. A POD is the smallest object, that you can create in kubernetes. The simplest of simplest cases were you have a single node kubernetes cluster with a single instance of your application running in a single docker container encapsulated in a POD. 
+
+What if the number of users accessing your application
+increase and you need to scale your application?
+
+- First, we will add another pod in the same Node (NEVER will add another but same container in the POD).
+- If we need to scale further, we will add another Node to the cluster.
+
+## Multi-Container PODs
+A single POD CAN have multiple containers, except for the fact that they are usually not multiple containers of the same kind. 
+
+![](./assets/multicontainernode.png)
+
+Sometimes you might have a scenario were you have a helper container, that might be doing some kind of supporting task for our web application such as processing a user entered data, processing a file uploaded by the user etc. and you want these helper containers to live along side your application container. In that case, you CAN have both of these containers part of the same POD, so that when a new application container is created, the helper is also created and when it dies the helper also dies since they are part of the same POD.
+
+## Running a pod
+```
+kubectl run nginx --image nginx:alpine
+              |             |
+              |             +-- image to be used
+              +-- name of pod
+```
+Get the list of pods:
+```
+kubectl get pods
+NAME    READY   STATUS    RESTARTS   AGE
+nginx   1/1     Running   0          11s
+```
+
+*You can access the running nginx server internally from the Node though. We will see networking and services we will get to know how to make this service accessible to end users.*
+
+## Deleting a pod
+```
+kubectl delete pods/<name>
+```
+
+## Using YAML
+K8s yaml definition contains 4 major parts:
+```yml
+apiVersion:
+  # represents the verison of the obejcts
+  # that we are planning to deploy.
+  # We can use `kubectl api-resources` to get detailed information regarding
+  # verious obejcts supported and their versions
+kind:
+  # refers to the type of object we are trying to create
+metadata:
+  # The metadata is data about the object like its name, labels etc.
+  # It’s IMPORTANT to note that under `metadata`, you can only specify name or 
+  # labels or anything else that kubernetes expects to be under metadata. 
+  # You CANNOT add any other property as you wish under this. 
+  # However, under `labels` you CAN have any kind of key or value pairs as you see fit. 
+spec:
+  # Depending on the object we are going to create, this is were 
+  # we provide additional information to kubernetes pertaining to that object.
+```
+
+Example: a pod
+```yml
+# nginx-pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  containers:
+    - name: nginx
+      image: nginx:alpine
+```
+Now run:
+```
+kubectl create -f <path/to/file.yml>
+```
+```sh
+[be@fedora ~]$ kubectl create -f exercises/01-nginx-pod.yml 
+pod/nginx created
+[be@fedora ~]$ kubectl get pods -w # w - watch
+NAME    READY   STATUS    RESTARTS   AGE
+nginx   0/1     ContainerCreating   0          29s
+nginx   0/1     ContainerCreating   0          30s
+nginx   1/1     Running             0          34s
+```
+
+## Edit a Running Pod
+```
+kubectl edit pod <name>
+```
+
+# Replicas, Controllers and ReplicaSets
+Controllers are the brain behind Kubernetes. They are processes that monitor kubernetes objects and respond accordingly. Here we are focusing on one controller - replication controller.
+
+![](./assets/replication-01.png)
+
+In our first scenario were we had a single POD running our application. What if for some reason, our application crashes and the POD fails? Users will no longer be able to access our application. To prevent users from losing access to our application, we would like to have more than one instance or POD running at the same time. That way if one fails we still have our application running on the other one. The replication controller helps us run multiple instances of a single POD in the kubernetes cluster thus providing High Availability.
+
+So does that mean you can’t use a replication controller if you plan to have a single POD? No! Even if you have a single POD, the replication controller can help by automatically bringing up a new POD when the existing one fails. Thus the replication controller ensures that the specified number of PODs are running at all times. 
+
+![](./assets/load-balancing-and-scaling.png)
+
+Another reason we need replication controller is to create multiple PODs to share the load across them. For example, in this simple scenario we have a single POD serving a set of users. When the number of users increase we deploy additional POD to balance the load across the two pods. If the demand further increases and If we were to run out of resources on the first node, we could deploy additional PODs across other nodes in the cluster. As you can see, the replication controller spans across multiple nodes in the cluster. It helps us balance the load across multiple pods on different nodes as well as scale our application when the demand increases.
+
+*Replica Set is the new standard over Replication Controller. Both have the same purpose but they are not the same. Replication
+Controller is the older technology that is being replaced by Replica Set. Replica set is the new recommended way to setup replication. However, whatever we discussed in the previous few slides remain applicable to both these technologies.*
+
+
+## Replication Controller
+```yml
+# replication-controller-definition.yml
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: myapp-rc
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-nginx
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+  replicas: 2
+```
+
+```
+kubectl create -f exercises/replication-controller.yml 
+```
+
+```sh
+be@fedora ~]$ kubectl create -f exercises/02-replication-controller.yml 
+replicationcontroller/myapp-rc created
+[be@fedora ~]$ kubectl get pods -w
+NAME             READY   STATUS    RESTARTS   AGE
+myapp-rc-gl8pl   1/1     Running   0          15s
+myapp-rc-h9sfj   1/1     Running   0          15s
+```
+
+## Replica Set
+```yml
+# replication-controller-definition.yml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: myapp-rs
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-nginx
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+  replicas: 2
+  selector: 
+    matchLabels:
+      type: front-end
+```
+Replica set requires a `selector` definition. The `selector` section helps the replicaset identify what pods fall under it. But why would you have to specify what PODs fall under it, if you have provided the contents of the pod-definition file itself in the template? It’s BECAUSE, **replica set can ALSO manage pods that were not created as part of the replicaset creation**. Say for example, there were pods created BEFORE the creation of the ReplicaSet that match the labels specified in the `selector`, the replica set will also take THOSE pods into consideration when creating the replicas.
+
+The selector is not a REQUIRED field in case of a replication controller, but it is still available. When you kip it, as we did in the previous slide, it assumes it to be the same as the labels provided in the pod-definition file. In case of replica set a user input IS required for this property. And it has to be written in the form of matchLabels as shown here. **The `matchLabels` selector simply matches the labels specified under it to the labels on the PODs.** The replicaset selector also provides many other options for matching labels that were not available in a replication controller.
+
+
+```
+kubectl create -f exercises/replicaset.yml 
+```
+
+## Labels and Selectors
+Why do we label our PODs and objects in kubernetes? Let us look at a simple scenario. Say we deployed 3 instances of our frontend web application as 3 PODs. We would like to create a replication controller
+or replica set to ensure that we have 3 active PODs at anytime.  You CAN use it to monitor existing pods, if you have them already created, as it IS in this example. In case they were not created, the
+replica set will create them for you. The role of the replicaset is to monitor the pods and if any of them were to fail, deploy new ones. The replica set is in FACT a process that monitors the pods. Now, how does the replicaset KNOW what pods to monitor. This is were labelling our PODs during creation comes in handy. 
+
+![](./assets/labels-and-selectors.png)
+
+We could now provide these labels as a filter for replicaset. Under the selector section we use the
+matchLabels filter and provide the same label that we used while creating the pods.
+
+
+Let's make sure if K8s is not lying by killing a running pod.
+```sh
+[be@fedora ~]$ kubectl get pods
+NAME             READY   STATUS    RESTARTS   AGE
+myapp-rs-2mtt9   1/1     Running   0          13m
+myapp-rs-zqrxp   1/1     Running   0          97s
+[be@fedora ~]$ kubectl delete pod/myapp-rs-2mtt9
+pod "myapp-rs-2mtt9" deleted
+```
+Now if we check the running pods again:
+```sh
+[be@fedora ~]$ kubectl get pods
+NAME             READY   STATUS    RESTARTS   AGE
+myapp-rs-zqrxp   1/1     Running   0          24s
+myapp-rs-lxrcc   1/1     Running   0          1m39s
+```
+
+## Scaling
+Let’s look at how we scale the replicaset. Say we started with 2 replicas and in the future we decide to scale to 6. How do we update our replicaset to scale to 6 replicas. Well there are multiple ways to do it. 
+
+The first, is to update the number of replicas in the definition file to 6. Then run the kubectl replace command specifying the same file using the –f parameter and that will update the replicaset to have 6 replicas.  
+
+```yml
+spec:
+  template:
+    ...
+    spec:
+      ...
+  replicas: 6
+  ...
+```
+```
+kubectl replace -f exercises/replicaset.yml
+```
+
+The second way to do it is to run the kubectl scale command. Use the replicas parameter to provide the new number of replicas and specify the same file as input. You may either input the definition file or provide the replicaset name. *However, Remember that using the file name as input will not result in the number of replicas being updated automatically in the file.* 
+
+```sh
+kubectl scale -–replicas=6 –f exercises/replicaset.yml
+# or 
+kubectl scale -–replicas=6 replicaset myapp-rs
+```
+
+There are also options available for automatically scaling the replicaset based on load, but that is an advanced topic and we will discuss it at a later time
+
+# Deployment
+
+![](./assets/deployment.png)
+
+So far we have seen PODs, which deploy single instances of our
+application such as the web application in this case. Each container is encapsulated in PODs. Multiple such PODs are deployed using Replication Controllers or Replica Sets. And then comes Deployment which is a kubernetes object that comes higher in the hierarchy. The deployment provides us with capabilities to upgrade the underlying instances seamlessly using rolling updates, undo changes, and pause and resume
+changes to deployments.
+
+## Creating a deployment
+```yml
+# deployment.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  replicas: 2
+  template:
+    metadata:
+      name: nginx
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+```
+```
+kubectl create –f exercises/deployment.yml
+```
+
+## Updates & Rollbacks
+
+![](./assets/rollout-and-revisioning.png)
+
+Whenever you create a new deployment or upgrade the images in an existing deployment it triggers a Rollout. **A rollout is the process of gradually deploying or upgrading your application containers.** When you first create a deployment, it triggers a rollout. A new rollout creates a new Deployment revision - Revision 1. In the future when the application is upgraded – meaning
+when the container version is updated to a new one – a new rollout is triggered and a new deployment revision is created named Revision 2.This helps us keep track of the changes made to our deployment and enables us to rollback to a previous version of deployment if necessary.
+
+```sh
+# see the status of your rollout by running the command:
+kubectl rollout status deployment/myapp-deployment
+# see the revisions and history of rollout
+kubectl rollout history deployment/myapp-deployment
+```
+
+### Deployment Strategies
+
+![](./assets/deployment-strategy.png)
+
+There are two types of deployment strategies. Say for example you have 2 replicas of a web application instance deployed. One way to upgrade these to a newer version is to destroy all of these and then create newer versions of application instances. Meaning first, destroy the 2 running instances and then deploy 2 new instances of the new application version. **The problem** with this as you can imagine, is that during the period after the older versions are down and before any newer version is up, the **application is down** and inaccessible to users. This strategy is known as the **Recreate strategy**, and thankfully this is NOT the default deployment strategy.
+
+The second strategy is were we do not destroy all of them at once. Instead we take down the older version and bring up a newer version one by one. This way the application never goes down and the upgrade is seamless.
+
+**RollingUpdate is the default Deployment Strategy.**
+
+```
+kubectl apply –f deployment-definition.yml
+```
+
+![](./assetsupgrades.png)
+
+When a new deployment is created, say to deploy 2 replicas, it first creates a Replicaset automatically, which in turn creates the number of PODs required to meet the number of replicas. When you upgrade your application, the kubernetes deployment object creates a NEW replicaset under the hoods and starts deploying the containers there. At the same time taking down the PODs in the old replica-set following a RollingUpdate strategy. 
+
+![](./assets/rollback.png)
+
+Say for instance once you upgrade your application, you realize something isn’t very right. Something’s wrong with the new version of build you used to upgrade. So you would like to rollback your update. Kubernetes deployments allow you to rollback to a previous revision. To undo a change run the command `kubectl rollout undo <deployment name>`. The deployment will then destroy the
+PODs in the new replicaset and bring the older ones up in the old replicaset and your application is back to its older format.
+
+When you compare the output of the kubectl get replicasets command, before and
+after the rollback, you will be able to notice this difference. Before the rollback the first replicaset had 0 PODs and the new replicaset had 2 PODs and this is reversed after the rollback is finished.
+
+| Action | Command |
+| --- | --- |
+| Create | `kubectl create –f deployment-definition.yml` |
+| Get | `kubectl get deployments` |
+| Update | `kubectl apply –f deployment-definition.yml` <br/> `kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1`|
+| Status | `kubectl rollout status deployment/myapp-deployment` <br/> `kubectl rollout history deployment/myapp-deployment` |
+| Rollback | `kubectl rollout undo deployment/myapp-deployment` |
+
+## Exercise
+Creating an nginx application with 2 replicas using the yml:
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  replicas: 2
+  template:
+    metadata:
+      name: nginx
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+```
+
+Create the deployment:
+```sh
+[be@fedora ~]$ kubectl create -f exercises/04-deployment.yml
+deployment.apps/myapp-deployment created
+```
+Checking the status:
+```sh
+[be@fedora ~]$ kubectl rollout status deployment.apps/myapp-deployment
+Waiting for deployment "myapp-deployment" rollout to finish: 0 of 2 updated replicas are available...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 of 2 updated replicas are available...
+deployment "myapp-deployment" successfully rolled out
+```
+
+See the history of deployment:
+```sh
+[be@fedora ~]$ kubectl rollout history deployment.apps/myapp-deployment
+deployment.apps/myapp-deployment 
+REVISION  CHANGE-CAUSE
+1         <none>
+```
+From the result, we can see that there is one revision for our application.
+
+Let's edit the deployment:
+```sh
+[be@fedora ~]$ kubectl edit deployment.apps/myapp-deployment
+```
+Change the name in metadata and save.
+```yml
+template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: myapp
+      name: nginx-web 👈
+```
+It will trigger another role out.
+```sh
+[be@fedora ~]$ kubectl rollout status deployment.apps/myapp-deployment
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated... # new pods are getting created
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination... # old pods are terminated
+deployment "myapp-deployment" successfully rolled out
+```
+
+Now, if we check the history again, there are two rollouts for our app.
+```sh
+[be@fedora ~]$ kubectl rollout history deployment.apps/myapp-deployment
+deployment.apps/myapp-deployment 
+REVISION  CHANGE-CAUSE
+1         <none>
+2         <none>
+```
+
+Another way to edit our deployment is to:
+```sh
+kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1
+```
+
+```sh
+[be@fedora ~]$ kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1
+deployment.apps/myapp-deployment image updated
+[be@fedora ~]$ kubectl rollout status deployment.apps/myapp-deployment
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination...
+deployment "myapp-deployment" successfully rolled out
+
+# verifying the image
+[be@fedora ~]$ kubectl describe deployment/myapp-deployment | grep -i image
+    Image:      nginx:1.9.1
+```
+
+Let's roll back it now to revision 2 from revision 3:
+```
+kubectl rollout undo deployment/myapp-deployment
+```
+```sh
+[be@fedora ~]$ kubectl rollout undo deployment/myapp-deployment
+deployment.apps/myapp-deployment rolled back
+[be@fedora ~]$ kubectl rollout status deployment.apps/myapp-deployment
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "myapp-deployment" rollout to finish: 1 old replicas are pending termination...
+deployment "myapp-deployment" successfully rolled out
+```
+```sh
+[be@fedora learning-k8s]$ kubectl rollout history deployment.apps/myapp-deployment
+deployment.apps/myapp-deployment 
+REVISION  CHANGE-CAUSE
+1         <none>
+3         <none>
+4         <none> 👈
+```
+We see that the second revision is gone and a 4th revision is added. That's because the new 4th revision is essentially same as the 2nd revision.
+
+```sh
+[be@fedora ~]$ kubectl describe deployment/myapp-deployment | grep -i image
+    Image:      nginx:alpine
+```
+
+Now, let's try to mess things up by updating our deployment to use an nginx image that does not exist and see how k8s handle it.
+```sh
+# current deployment state..
+# there are two replicas running
+[be@fedora learning-k8s]$ kubectl get deployment
+NAME               READY   UP-TO-DATE   AVAILABLE   AGE
+myapp-deployment   2/2     2            2           30m
+# update it to use a new image (that does not exist in docker hub)
+[be@fedora learning-k8s]$ kubectl set image deployment/myapp-deployment nginx=nginx:thatDoesNotExist
+deployment.apps/myapp-deployment image updated
+# now if we see the deployment status:
+# - 2 are ready (they are old revision's pods)
+# - 1 is trying to come up
+[be@fedora learning-k8s]$ kubectl get deployment
+NAME               READY   UP-TO-DATE   AVAILABLE   AGE
+myapp-deployment   2/2     1            2           31m
+# k8s is not able to pull image. therefore it won't remove the existing
+# replicas (unless and until next update is success, it will keep running
+# previos revison's pods)
+[be@fedora learning-k8s]$ kubectl get pods
+NAME                                READY   STATUS           RESTARTS   AGE
+myapp-deployment-b5f59897d-dkjcv    1/1     Running          0          5m47s
+myapp-deployment-b5f59897d-mf5p6    1/1     Running          0          5m42s
+myapp-deployment-5d9449f897-ww2l6   0/1     ErrImagePull 👈  0          17s
+[be@fedora learning-k8s]$ 
+```
+
+> Creating and updating a deployment can be done by making changes in it's yaml definition and running `kubectl apply -f`
+---
+
+# Networking
+
+![](./assets/networking-01.png)
+
+Let us look at the very basics of networking in Kubernetes. We will start with a single node kubernetes cluster. The node has an IP address, say it is 192.168.1.2 in this case. This is the IP address we use to access the kubernetes node, SSH into it etc. So on the single node kubernetes cluster we have created a Single POD. As you know a POD hosts a container. **Unlike in the docker world were an IP address is always assigned to a Docker CONTAINER, in Kubernetes the IP address is assigned to a POD. Each POD in kubernetes gets its own internal IP Address.** In this case its in the range 10.244 series and the IP assigned to the POD is 10.244.0.2. 
+
+#### So how is it getting this IP address? 
+When Kubernetes is initially configured it creates an internal private network with the address 10.244.0.0 and all PODs are attached to it. When you deploy multiple PODs, they all get a separate IP assigned. The PODs can communicate to each other through this IP. But accessing other PODs using this internal IP address MAY not be a good idea as its subject to change when PODs are recreated. We will see BETTER ways to establish communication between PODs in a while. For now its important to understand how the internal networking works in kubernetes.
+
+### Cluster Networking
+
+How does networking work when you have multiple nodes in a cluster?
+
+![](./assets/networking-02.png)
+
+In this case we have two nodes running kubernetes and they have IP addresses 192.168.1.2 and 192.168.1.3 assigned to them. Note that they are not part of the same cluster yet. Each of them has a single POD deployed. As discussed in the previous slide these pods are attached to an internal network and they have their own IP addresses assigned. HOWEVER, if you look at the network addresses, you can see that they are the same. The two networks have an address 10.244.0.0 and the PODs deployed have the same address too. This is NOT going to work well when the nodes are part of the same cluster. The PODs have the same IP addresses assigned to them and that will lead to IP conflicts in the network. Now that’s ONE problem. 
+
+When a kubernetes cluster is SETUP, kubernetes does NOT automatically setup any kind of networking to handle these issues. As a matter of fact, kubernetes expects US to setup networking to meet certain fundamental requirements. Some of these are that all the containers or PODs in a kubernetes cluster MUST be able to communicate with one another without having to configure NAT. All nodes must be able to communicate with containers and all containers must be able to communicate with the nodes in the cluster. Kubernetes expects US to setup a networking solution that meets these criteria. 
+
+Fortunately, we don’t have to set it up ALL on our own as there are multiple pre-built solutions available. Some of them are the cisco ACI networks, Cilium, Big Cloud Fabric, Flannel, Vmware NSX-t and Calico. Depending on the platform you are deploying your Kubernetes cluster on you may use any of these solutions. For example, if you were setting up a kubernetes cluster from scratch on your own systems, you may use any of these solutions like Calico, Flannel etc. If you were deploying on a Vmware environment NSX-T may be a good option. If you look at the play-with-k8s labs they use WeaveNet. In our demos in the course we used Calico. Depending on your environment and after evaluating the Pros and Cons of each of these, you may chose the right networking solution.
+
+![](./assets/networking-03.png)
+
+So back to our cluster, with the Calico networking setup, it now manages the networks and Ips in my nodes and assigns a different network address for each network in the nodes. This creates a virtual network of all PODs and nodes were they are all assigned a unique IP Address. And by using simple routing techniques the cluster networking enables communication between the different PODs or Nodes to meet the networking requirements of kubernetes. Thus all PODs can now communicate to each other using the assigned IP addresses.
+
+# Services
+
+![](./assets/services.png)
+
+Kubernetes Services enable communication between various components within and outside of the application. Kubernetes Services helps us connect applications together with other applications or users. For example, our application has groups of PODs running various sections, such as a group for serving front-end load to users, another group running back-end processes, and a third group connecting to an external data source. It is Services that enable connectivity between these groups of PODs. Services enable the front-end application to be made available to users, it helps communication between back-end and front-end PODs, and helps in establishing connectivity to an external data source. Thus services enable loose coupling between microservices in our application.
+
+There are mainly 3 services in K8s.
+
+1. **NodePort** were the service makes an internal POD accessible on a Port on the Node. 
+2. **ClusterIP** service creates a virtual IP inside the cluster to enable communication between different services such as a set of front-end servers to a set of backendservers. 
+3. **LoadBalancer** provisions a load balancer for our service in supported cloud providers.
+
+## NodePort
+
+![](./assets/nodeport.png)
+
+We deployed our POD having a web application running on it. How do we as an external user access the web page? First of all, lets look at the existing setup. The Kubernetes Node has an IP address and that is 192.168.1.2. My laptop is on the same network as well, so it has an IP address 192.168.1.10. The internal POD network is in the range 10.244.0.0 and the POD has an IP 10.244.0.2. 
+
+Clearly, I cannot ping or access the POD at address 10.244.0.2 as its in a separate network. So what are the options to see the webpage? First, if we were to SSH into the kubernetes node at 192.168.1.2, from the node, we would be able to access the POD’s webpage by doing a curl. But this is from inside the kubernetes Node and that’s not what I really want. I want to be able to access the web server from my own laptop without having to SSH into the node and simply by accessing the IP of the kubernetes node. So **we need something in the middle to help us map requests to the node from a client through the node to the POD running the web container.**
+
+That is where the kubernetes service comes into play. The kubernetes service is an object just like PODs, Replicaset or Deployments. One of its use case is to listen to a port on the Node and forward requests on that port to a port on the POD running the web application. This type of service is known as a **NodePort service because the service listens to a port on the Node and forwards requests to PODs**. 
+
+![](./assets/nodeport-02.png)
+
+There are 3 ports involved. The port on the POD were the actual web server is running is port 80. And it is referred to as the **targetPort**, because that is were the service forwards the requests to. The second port is the port on the service itself. It is simply referred to as the **port**. Remember, these terms are from the viewpoint of the service. The service is in fact like a virtual server inside the node. Inside the cluster it has its own IP address. And that IP address is called the Cluster-IP of the service. And finally we have the port on the Node itself which we use to access the web server externally. And that is known as the **NodePort**. As you can see it is 30008. That is because NodePorts can only be in a valid range which is from **30000 to 32767**.
+
+Our pod definition:
+```yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:  👈 # pod labels. we will use this in service's selector
+    app: myapp
+    type: front-end
+spec:
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      resources:
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+```
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-nodeport
+spec:
+  type: NodePort
+  ports:
+    - targetPort: 80
+      port: 80 # mandatory
+      nodePort: 30080
+  selector:
+    app: myapp
+    type: front-end
+```
+The only mandatory field is `port` .in the `ports` array If you don’t provide a targetPort it is assumed to be the same as port and if you don’t provide a nodePort a free port in the valid range between 30000 and 32767 is automatically allocated. 
+
+We connect the pod and the service using `selector`s.
+
+Now, start the pod and service using `kubectl create -f` or `kubectl apply -f` and then `curl http://192.168.1.2:30008` (here 1.2 is our node's IP) to get the webpage. ✌
+
+---
+
+Lets look at what happens when the PODs are distributed across multiple
+nodes. In this case we have the web application on PODs on separate nodes in the cluster.
+
+![](./assets/service-across-nodes.png)
+
+When we create a service , without us having to do ANY kind of additional
+configuration, kubernetes creates a service that spans across all the nodes in the cluster and maps the target port to the SAME NodePort on all the nodes in the cluster. This way you can access your application using the IP of any node in the cluster and using the same port number which in this case is 30008. 😃
+
