@@ -1035,3 +1035,97 @@ spec:
     targetPort: 80
     nodePort: 30080
 ```
+
+---
+
+# Microservices Architecture
+We will be deploying an application which is designed in the below architecture:
+
+![](https://github.com/dockersamples/example-voting-app/raw/master/architecture.png)
+
+The source code  and related docs for the same can be found at https://github.com/dockersamples/example-voting-app. The images for the voting, result and worker apps are available on docker hub at kodekloud/examplevotingapp_vote, kodekloud/examplevotingapp_result and kodekloud/examplevotingapp_worker respectively.
+
+yml definiton for pods:
+- [voting-app-pod.yml](./exercises/votingapp/voting-app-pod.yml)
+- [result-app-pod.yml](./exercises/votingapp/result-app-pod.yml)
+- [redis-pod.yml](./exercises/votingapp/redis-pod.yml)
+- [postgres-pod.yml](./exercises/votingapp/postgres-pod.yml)
+- [worker-app-pod.yml](./exercises/votingapp/worker-app-pod.yml)
+
+services:
+- [voting-app-service.yml](./exercises/votingapp/voting-app-service.yml)
+- [result-app-service.yml](./exercises/votingapp/result-app-service.yml)
+- [redis-service.yml](./exercises/votingapp/redis-service.yml)
+- [postgres-service.yml](./exercises/votingapp/postgres-service.yml)
+- [worker-app-service.yml](./exercises/votingapp/worker-app-service.yml)
+
+```sh
+docker apply -f votingapp/
+```
+```sh
+[be@fedora exercises]$ kubectl get all 
+NAME                 READY   STATUS             RESTARTS        AGE
+pod/postgres-pod     1/1     Running            0               27m
+pod/redis-pod        1/1     Running            0               27m
+pod/result-app-pod   1/1     Running            0               27m
+pod/voting-app-pod   1/1     Running            0               27m
+pod/worker-app-pod   0/1     Running   0   27m
+
+NAME                     TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+service/kubernetes       ClusterIP   10.152.183.1     <none>        443/TCP        5d1h
+service/db               ClusterIP   10.152.183.30    <none>        5432/TCP       27m
+service/redis            ClusterIP   10.152.183.186   <none>        6379/TCP       27m 
+                                     👇
+service/result-service   NodePort    10.152.183.150   <none>        80:30005/TCP   27m
+                                     👇
+service/voting-service   NodePort    10.152.183.12    <none>        80:30004/TCP   27m
+```
+
+Now, we can connect to the cluster IPs to get the voting and result apps.
+
+## Using Deployments - Recommended Approach
+It's always recommended to create deployments over single pods due to many revisioning and rollback features as we have already seen. So, let's create deployments for all all the pods we have created before:
+- [voting-app-deploy.yml](./exercises/votingapp/voting-app-deploy.yml)
+- [result-app-deploy.yml](./exercises/votingapp/result-app-deploy.yml)
+- [redis-deploy.yml](./exercises/votingapp/redis-deploy.yml)
+- [postgres-deploy.yml](./exercises/votingapp/postgres-deploy.yml)
+- [worker-app-deploy.yml](./exercises/votingapp/worker-app-deploy.yml)
+
+And then bring up our app:
+```sh
+# start voting-app deployment and service
+[be@fedora exercises]$ kubectl apply -f votingapp/voting-app-deploy.yml 
+deployment.apps/voting-app-deploy created
+[be@fedora exercises]$ kubectl apply -f votingapp/voting-app-service.yml
+service/voting-service created
+# start redis deployment and service
+[be@fedora exercises]$ kubectl apply -f votingapp/redis-deploy.yml 
+deployment.apps/redis-deploy created
+[be@fedora exercises]$ kubectl apply -f votingapp/redis-service.yml 
+service/redis created
+# start postgres deployment and service
+[be@fedora exercises]$ kubectl apply -f votingapp/postgres-deploy.yml 
+deployment.apps/postgres-deploy created
+[be@fedora exercises]$ kubectl apply -f votingapp/postgres-service.yml 
+service/db created
+# start postgres worker deployment
+[be@fedora exercises]$ kubectl apply -f votingapp/worker-app-deploy.yml 
+deployment.apps/worker-app-deploy created
+# list all services and deployments
+[be@fedora exercises]$ kubectl get deployment,svc
+NAME                                READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/voting-app-deploy   1/1     1            1           2m28s
+deployment.apps/redis-deploy        1/1     1            1           115s
+deployment.apps/postgres-deploy     1/1     1            1           97s
+deployment.apps/worker-app-deploy   0/1     1            0           54s
+
+NAME                     TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+...
+service/voting-service   NodePort    10.152.183.169   <none>        80:30004/TCP   2m14s
+service/redis            ClusterIP   10.152.183.249   <none>        6379/TCP       108s
+service/db               ClusterIP   10.152.183.38    <none>        5432/TCP       93s
+```
+
+---
+
+EOF
